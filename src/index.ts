@@ -1,41 +1,141 @@
-/**
- * Welcome to Cloudflare Workers!
- *
- * This is a template for a Queue consumer: a Worker that can consume from a
- * Queue: https://developers.cloudflare.com/queues/get-started/
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { createVideo, getProfileByExtID, getProfiles, getVideoByExtID, setPublicVideo } from "@qwru/db";
+import { YoutubeProfile, DiscordMessageBody } from "@qwru/types";
+import { env, waitUntil } from "cloudflare:workers";
+import { timingSafeEqual } from "crypto";
+import { XMLParser } from "fast-xml-parser";
+
+interface Env {
+  DISCORD_QUEUE: Queue<DiscordMessageBody>;
+}
+
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+})
+
+const HUB_URL = "https://pubsubhubbub.appspot.com/subscribe";
+const callbackUrl = "https://youtubehook.qwru0905.dev";
+
+async function registerYoutubeChannel(profile: YoutubeProfile) {
+  const channelId = profile.ext_id;
+  const leastSeconds = 432000;
+
+  const body = new URLSearchParams({
+    "hub.mode": "subscribe",
+    "hub.topic": `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${channelId}`,
+    "hub.callback": callbackUrl,
+    "hub.verify": "async",
+    "hub.lease_seconds": String(leastSeconds),
+    "hub.secret": env.WEBHOOK_SECRET,
+  });
+
+  const res = await fetch(HUB_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  if (res.status !== 202 && res.status !== 204) {
+    throw new Error(`${channelId} register failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+async function registerAll() {
+  const db = env.DB;
+  const profiles = await getProfiles(db);
+
+  for (const profile of profiles) {
+    await registerYoutubeChannel(profile);
+  }
+}
+
+export async function verifyHmac(body: string, header: string, secret: string) {
+  if (!header.startsWith('sha1=')) return false;
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body));
+  const expected = 'sha1=' + [...new Uint8Array(sig)]
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+
+  if (expected.length !== header.length) return false;
+  return timingSafeEqual(new TextEncoder().encode(expected), new TextEncoder().encode(header));
+}
+
+export async function processYoutubeHook(feed: YtFeed) {
+  const db = env.DB;
+  const entry = feed.entry;
+  if (!entry) return;
+  const videoId = entry["yt:videoId"];
+  const video = await getVideoByExtID(db, videoId);
+  if (video) {
+    if (!video.is_public) {
+      setPublicVideo(db, video.id, true);
+    }
+    return;
+  }
+  const channelId = entry["yt:channelId"];
+  const channel = await getProfileByExtID(db, channelId);
+  if (!channel) {
+    throw new Error("wtf: channel isnt exist (processYoutubeHook)");
+  }
+  const video2 = await createVideo(db, videoId, channel.code, entry.title, { is_public: true })
+  if (!video2) {
+    throw new Error(`why video doesnt created (processYoutubeHook)`);
+  }
+
+  await env.DISCORD_QUEUE.send({
+    action: "youtube_hook",
+    videoId: videoId,
+  });
+}
+
+async function challenge(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const hubMode = url.searchParams.get("hub.mode");
+  const hubChallenge = url.searchParams.get("hub.challenge");
+
+  if ((hubMode === "subscribe" || hubMode === "unsubscribe") && hubChallenge) {
+    // 허브에서 보낸 챌린지 코드를 평문(text/plain) 그대로 200 상태코드로 반환해야 인증이 완료됩니다.
+    return new Response(hubChallenge, {
+      status: 200,
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+  return new Response("Missing WebSub verification parameters", { status: 400 });
+}
+
+async function post(request: Request) {
+  const raw = await request.text();                       // raw body for signature checks
+  const signature = request.headers.get('x-hub-signature') || '';
+  if (!(await verifyHmac(raw, signature, env.WEBHOOK_SECRET))) {
+    return new Response('Invalid signature', { status: 401 });
+  }
+
+  let feed: YtFeed | undefined;
+  try {
+    feed = (parser.parse(raw) as { feed?: YtFeed }).feed;
+  } catch {
+    return new Response('ignored', { status: 200 })
+  }
+
+  // Respond fast; finish the work in the background
+  waitUntil(processYoutubeHook(feed as YtFeed))
+  return new Response('OK', { status: 200 });
+}
 
 export default {
-	// Our fetch handler is invoked on a HTTP request: we can send a message to a queue
-	// during (or after) a request.
-	// https://developers.cloudflare.com/queues/platform/javascript-apis/#producer
-	async fetch(req, env, ctx): Promise<Response> {
-		// To send a message on a queue, we need to create the queue first
-		// https://developers.cloudflare.com/queues/get-started/#3-create-a-queue
-		await env.MY_QUEUE.send({
-			url: req.url,
-			method: req.method,
-			headers: Object.fromEntries(req.headers),
-		});
-		return new Response('Sent message to the queue');
-	},
-	// The queue handler is invoked when a batch of messages is ready to be delivered
-	// https://developers.cloudflare.com/queues/platform/javascript-apis/#messagebatch
-	async queue(batch, env): Promise<void> {
-		// A queue consumer can make requests to other endpoints on the Internet,
-		// write to R2 object storage, query a D1 Database, and much more.
-		for (let message of batch.messages) {
-			// Process each message (we'll just log these)
-			console.log(`message ${message.id} processed: ${JSON.stringify(message.body)}`);
-		}
-	},
+  async fetch(req, env, ctx): Promise<Response> {
+    if (req.method === 'GET') {
+      return challenge(req);
+    } else if (req.method === 'POST') {
+      return post(req);
+    } else {
+      return new Response('Invalid signature', { status: 401 });
+    }
+  },
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(registerAll());
+  }
 } satisfies ExportedHandler<Env, Error>;

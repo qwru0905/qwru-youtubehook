@@ -19,7 +19,7 @@
   "queues": {
     "producers": [
       {
-        "binding": "DISCORD_BOT",
+        "binding": "DISCORD_QUEUE",
         "queue": "10ca36eb6e204efcad1760e6205b6b76"
       }
     ]
@@ -31,6 +31,11 @@
       "database_id": "04f588cd-a184-4e0e-861c-add0a241de47",
     }
   ],
+  "triggers": {
+    "crons": [
+      "0 0 * * *"
+    ],
+  },
   /**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
