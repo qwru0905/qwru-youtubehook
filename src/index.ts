@@ -1,5 +1,5 @@
 import { createVideo, getProfileByExtID, getProfiles, getVideoByExtID, setPublicVideo } from "@qwru/db";
-import { YoutubeProfile, DiscordMessageBody } from "@qwru/types";
+import { YoutubeProfile, DiscordMessageBody, YoutubeMessageBody } from "@qwru/types";
 import { env, waitUntil } from "cloudflare:workers";
 import { timingSafeEqual } from "crypto";
 import { XMLParser } from "fast-xml-parser";
@@ -137,5 +137,20 @@ export default {
   },
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(registerAll());
+  },
+  async queue(batch: MessageBatch<YoutubeMessageBody>, env: Env, ctx: ExecutionContext): Promise<void> {
+    for (const msg of batch.messages) {
+      try {
+        switch (msg.body.action) {
+          case "register_profile":
+            await registerYoutubeChannel(msg.body.profile);
+            break;
+        }
+        msg.ack();
+      } catch (e) {
+        console.error(e);
+        msg.retry();
+      }
+    }
   }
-} satisfies ExportedHandler<Env, Error>;
+} satisfies ExportedHandler<Env, YoutubeMessageBody>;

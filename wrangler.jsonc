@@ -20,7 +20,14 @@
     "producers": [
       {
         "binding": "DISCORD_QUEUE",
-        "queue": "10ca36eb6e204efcad1760e6205b6b76"
+        "queue": "discord-queue"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "youtube-queue",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1
       }
     ]
   },

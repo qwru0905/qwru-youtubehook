@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@qwru/db": "^0.1.3",
-    "@qwru/types": "^0.1.1",
+    "@qwru/types": "^0.1.2",
     "fast-xml-parser": "^5.12.1"
   }
 }
